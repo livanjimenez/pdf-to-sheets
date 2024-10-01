@@ -1,101 +1,178 @@
-import Image from "next/image";
+'use client';
 
-export default function Home() {
+import * as XLSX from 'xlsx';
+import * as pdfjsLib from 'pdfjs-dist';
+import { createWorker, PSM } from 'tesseract.js';
+import { useState } from 'react';
+import 'pdfjs-dist/build/pdf.worker.min.mjs';
+
+function exportToExcel(data: any[]): void {
+  const worksheet = XLSX.utils.json_to_sheet(data);
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, worksheet, 'Sheet1');
+  XLSX.writeFile(workbook, 'sample.xlsx');
+}
+
+export default function Page() {
+  const [extractedData, setExtractedData] = useState<string[]>([]);
+  const [pdfFile, setPdfFile] = useState<File | null>(null);
+
+  const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (file) {
+      setPdfFile(file);
+    }
+  };
+
+  const convertPdfToImage = async (pdfFile: ArrayBuffer): Promise<string> => {
+    const pdf = await pdfjsLib.getDocument({ data: pdfFile }).promise;
+    const page = await pdf.getPage(1);
+
+    const scale = 1.5;
+    const viewport = page.getViewport({ scale });
+
+    const canvas = document.createElement('canvas');
+    const context = canvas.getContext('2d');
+
+    if (!context) {
+      throw new Error('Failed to get canvas context');
+    }
+
+    canvas.height = viewport.height;
+    canvas.width = viewport.width;
+
+    const renderContext = {
+      canvasContext: context,
+      viewport: viewport,
+    };
+
+    await page.render(renderContext).promise;
+
+    const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
+    const data = imageData.data;
+
+    for (let i = 0; i < data.length; i += 4) {
+      const r = data[i];
+      const g = data[i + 1];
+      const b = data[i + 2];
+
+      const grayscale = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+      const inverted = 255 - grayscale;
+
+      data[i] = inverted;
+      data[i + 1] = inverted;
+      data[i + 2] = inverted;
+    }
+
+    context.putImageData(imageData, 0, 0);
+    const imageUrl = canvas.toDataURL('image/png');
+    console.log('Generated Image URL:', imageUrl);
+
+    return imageUrl;
+  };
+
+  const extractTextFromImage = async (imageUrl: string) => {
+    const worker = await createWorker('eng', 1);
+
+    try {
+      const {
+        data: { text },
+      } = await worker.recognize(imageUrl);
+      console.log('Full Extracted Text:', text);
+
+      const lines = text.split('\n');
+
+      lines.forEach((line, index) => {
+        console.log(`Line ${index + 1}:`, line);
+      });
+
+      const filteredText = lines.map((line) => {
+        const columns = line.split(/[\s,]+/);
+        console.log('Columns after split:', columns);
+
+        return {
+          clientName: columns[0] || '',
+          projectAddress: columns[1] || '',
+          timeIn: columns[2] || '',
+          timeOut: columns[3] || '',
+        };
+      });
+
+      setExtractedData(
+        filteredText.map(
+          (row) =>
+            `${row.clientName}, ${row.projectAddress}, ${row.timeIn}, ${row.timeOut}`,
+        ),
+      );
+    } catch (error) {
+      console.error('Error recognizing image:', error);
+    } finally {
+      await worker.terminate();
+    }
+  };
+
+  const handleSubmit = async (): Promise<void> => {
+    if (!pdfFile) {
+      alert('Please upload a PDF file first.');
+      return;
+    }
+
+    try {
+      const fileReader = new FileReader();
+      fileReader.onload = async () => {
+        const pdfArrayBuffer = fileReader.result as ArrayBuffer;
+        const imageUrl = await convertPdfToImage(pdfArrayBuffer);
+        await extractTextFromImage(imageUrl);
+      };
+      fileReader.readAsArrayBuffer(pdfFile);
+    } catch (error) {
+      console.error('Error processing PDF:', error);
+    }
+  };
+
+  const handleExportToExcel = (): void => {
+    const data = extractedData.map((line, index) => ({
+      name: line.split(',')[0],
+      address: line.split(',')[1],
+      timeIn: line.split(',')[2],
+      timeOut: line.split(',')[3],
+    }));
+    exportToExcel(data);
+  };
+
   return (
-    <div className="grid grid-rows-[20px_1fr_20px] items-center justify-items-center min-h-screen p-8 pb-20 gap-16 sm:p-20 font-[family-name:var(--font-geist-sans)]">
-      <main className="flex flex-col gap-8 row-start-2 items-center sm:items-start">
-        <Image
-          className="dark:invert"
-          src="https://nextjs.org/icons/next.svg"
-          alt="Next.js logo"
-          width={180}
-          height={38}
-          priority
-        />
-        <ol className="list-inside list-decimal text-sm text-center sm:text-left font-[family-name:var(--font-geist-mono)]">
-          <li className="mb-2">
-            Get started by editing{" "}
-            <code className="bg-black/[.05] dark:bg-white/[.06] px-1 py-0.5 rounded font-semibold">
-              app/page.tsx
-            </code>
-            .
-          </li>
-          <li>Save and see your changes instantly.</li>
-        </ol>
-
-        <div className="flex gap-4 items-center flex-col sm:flex-row">
-          <a
-            className="rounded-full border border-solid border-transparent transition-colors flex items-center justify-center bg-foreground text-background gap-2 hover:bg-[#383838] dark:hover:bg-[#ccc] text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
+    <>
+      <div className="flex flex-col m-4">
+        <div className="flex justify-center gap-4 my-10">
+          <input
+            type="file"
+            accept=".pdf"
+            onChange={handleFileUpload}
+            className="p-2"
+          />
+          <button
+            onClick={handleSubmit}
+            className="bg-slate-100 hover:bg-slate-200 text-black rounded-md p-2"
           >
-            <Image
-              className="dark:invert"
-              src="https://nextjs.org/icons/vercel.svg"
-              alt="Vercel logomark"
-              width={20}
-              height={20}
-            />
-            Deploy now
-          </a>
-          <a
-            className="rounded-full border border-solid border-black/[.08] dark:border-white/[.145] transition-colors flex items-center justify-center hover:bg-[#f2f2f2] dark:hover:bg-[#1a1a1a] hover:border-transparent text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 sm:min-w-44"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
+            Submit
+          </button>
+          <button
+            onClick={handleExportToExcel}
+            className="bg-slate-100 hover:bg-slate-200 text-black rounded-md p-2"
           >
-            Read our docs
-          </a>
+            Export to Excel
+          </button>
         </div>
-      </main>
-      <footer className="row-start-3 flex gap-6 flex-wrap items-center justify-center">
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="https://nextjs.org/icons/file.svg"
-            alt="File icon"
-            width={16}
-            height={16}
-          />
-          Learn
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="https://nextjs.org/icons/window.svg"
-            alt="Window icon"
-            width={16}
-            height={16}
-          />
-          Examples
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="https://nextjs.org/icons/globe.svg"
-            alt="Globe icon"
-            width={16}
-            height={16}
-          />
-          Go to nextjs.org →
-        </a>
-      </footer>
-    </div>
+
+        {extractedData.length > 0 && (
+          <div className="mt-4 p-4 border border-slate-300">
+            <h3 className="text-lg font-bold">Extracted Text:</h3>
+            {extractedData.map((line, index) => (
+              <p key={index}>{line}</p>
+            ))}
+          </div>
+        )}
+      </div>
+    </>
   );
 }
